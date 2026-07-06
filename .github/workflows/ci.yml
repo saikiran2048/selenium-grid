@@ -1,0 +1,120 @@
+name: Selenium Grid CI
+
+# Runs on every push/PR. This is the free, cloud-hosted equivalent of the
+# Jenkinsfile matrix stage. GitHub Actions runners come with Docker and
+# Docker Compose pre-installed, so the docker-compose.yml from this repo
+# works completely unchanged - same artifact, different orchestrator.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}   # lets you click "Run workflow" manually in the GitHub UI - good for a live demo
+
+jobs:
+  grid-tests:
+    name: ${{ matrix.browser }} / ${{ matrix.environment }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false   # if chrome-qa fails, still let firefox-staging finish - mirrors Jenkins matrix behavior
+      matrix:
+        browser: [chrome, firefox]
+        environment: [qa, staging]
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+
+      - name: Start Selenium Grid
+        run: docker compose up -d --scale chrome-node=1 --scale firefox-node=1
+
+      - name: Wait for Grid to be ready
+        run: |
+          for i in $(seq 1 30); do
+            if curl -s http://localhost:4444/wd/hub/status | grep -q '"ready":true'; then
+              echo "Grid is ready"
+              exit 0
+            fi
+            echo "Waiting for Grid... ($i/30)"
+            sleep 5
+          done
+          echo "Grid did not become ready in time"
+          docker compose logs
+          exit 1
+
+      - name: Run tests
+        run: |
+          mvn -B clean test \
+            -Dbrowser=${{ matrix.browser }} \
+            -Denvironment=${{ matrix.environment }} \
+            -DgridUrl=http://localhost:4444/wd/hub
+
+      # This is the "looks superreal" part: every matrix cell uploads its own
+      # named report, so a reviewer can open the Actions run and download
+      # chrome-qa's results separately from firefox-staging's.
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: surefire-report-${{ matrix.browser }}-${{ matrix.environment }}
+          path: target/surefire-reports/
+          retention-days: 14
+
+      - name: Tear down Grid
+        if: always()
+        run: docker compose down -v
+
+  k8s-stretch-goal:
+    name: k8s Grid (stretch goal, kind cluster)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+
+      # kind = "Kubernetes IN Docker" - a real (if tiny) k8s cluster running
+      # as containers on the runner itself. Free, no cloud k8s bill, and it's
+      # a genuine kubectl-apply-able cluster, not a simulation.
+      - name: Create kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: selenium-grid
+
+      - name: Deploy Selenium Grid to k8s
+        run: |
+          kubectl apply -f k8s/selenium-grid.yaml
+          kubectl rollout status deployment/selenium-hub --timeout=120s
+          kubectl rollout status deployment/chrome-node --timeout=120s
+
+      - name: Port-forward the Hub
+        run: |
+          kubectl port-forward svc/selenium-hub 4444:4444 &
+          sleep 5
+
+      - name: Run tests against k8s Grid
+        run: |
+          mvn -B clean test \
+            -Dbrowser=chrome \
+            -Denvironment=qa \
+            -DgridUrl=http://localhost:4444/wd/hub
+
+      - name: Upload k8s test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: surefire-report-k8s
+          path: target/surefire-reports/
+          retention-days: 14
