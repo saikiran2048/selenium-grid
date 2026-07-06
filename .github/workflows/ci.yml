@@ -36,16 +36,23 @@ jobs:
         run: docker compose up -d --scale chrome-node=1 --scale firefox-node=1
 
       - name: Wait for Grid to be ready
+        # jq is preinstalled on GitHub's ubuntu-latest runners - no apt-get needed.
+        # We parse the actual JSON structure (.value.ready) instead of grepping
+        # for the literal substring '"ready":true', because the Hub's JSON can
+        # legally include a space after the colon ("ready": true) depending on
+        # formatting - a plain grep is brittle to that; jq isn't.
         run: |
-          for i in $(seq 1 30); do
-            if curl -s http://localhost:4444/wd/hub/status | grep -q '"ready":true'; then
+          for i in $(seq 1 40); do
+            status=$(curl -s http://localhost:4444/status || true)
+            ready=$(echo "$status" | jq -r '.value.ready' 2>/dev/null || echo "false")
+            if [ "$ready" = "true" ]; then
               echo "Grid is ready"
               exit 0
             fi
-            echo "Waiting for Grid... ($i/30)"
+            echo "Waiting for Grid... ($i/40): $status"
             sleep 5
           done
-          echo "Grid did not become ready in time"
+          echo "Grid did not become ready in time - dumping container logs:"
           docker compose logs
           exit 1
 
@@ -66,6 +73,19 @@ jobs:
           name: surefire-report-${{ matrix.browser }}-${{ matrix.environment }}
           path: target/surefire-reports/
           retention-days: 14
+
+      - name: Dump Grid logs on failure
+        if: failure()
+        run: |
+          mkdir -p grid-logs
+          docker compose logs --no-color > grid-logs/docker-compose.log
+
+      - name: Upload Grid logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: grid-logs-${{ matrix.browser }}-${{ matrix.environment }}
+          path: grid-logs/
 
       - name: Tear down Grid
         if: always()

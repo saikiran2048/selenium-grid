@@ -19,16 +19,24 @@ pipeline {
                 // The Hub returns {"value":{"ready":true,...}} once enough
                 // nodes have registered. Sleeping a fixed N seconds is the
                 // #1 cause of "works on my machine, flaky in CI" Grid pipelines.
+                // Caveat vs. the GitHub Actions version of this same check: GitHub's
+                // ubuntu-latest runners ship jq preinstalled, but a Jenkins agent
+                // might not. If this fails with "jq: command not found", add a
+                // one-time `sh 'which jq || apt-get install -y jq'` to your agent
+                // provisioning, or install it in a custom Jenkins agent image.
                 sh '''
-                    for i in $(seq 1 30); do
-                        if curl -s http://localhost:4444/wd/hub/status | grep -q '"ready":true'; then
+                    for i in $(seq 1 40); do
+                        status=$(curl -s http://localhost:4444/status || true)
+                        ready=$(echo "$status" | jq -r '.value.ready' 2>/dev/null || echo "false")
+                        if [ "$ready" = "true" ]; then
                             echo "Grid is ready"
                             exit 0
                         fi
-                        echo "Waiting for Grid..."
+                        echo "Waiting for Grid... ($i/40): $status"
                         sleep 5
                     done
-                    echo "Grid did not become ready in time"
+                    echo "Grid did not become ready in time - dumping container logs:"
+                    docker compose logs
                     exit 1
                 '''
             }
