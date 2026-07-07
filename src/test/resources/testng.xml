@@ -1,13 +1,29 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE suite SYSTEM "https://testng.org/testng-1.0.dtd">
 <!--
-    parallel="methods" + thread-count="3": TestNG runs each @Test method on its
-    own thread. This is what forces DriverFactory to be ThreadLocal - if it
-    weren't, two threads would stomp on the same "driver" field and you'd get
-    NoSuchSessionException / element-not-attached type flakiness that's a classic
-    "explain a flaky test you fixed" interview story.
+    thread-count is deliberately 2, not 3 - it must not exceed the actual
+    concurrent session capacity of the Grid it's running against.
+
+    In this project's docker-compose.yml / CI workflow, one chrome-node
+    container is started with SE_NODE_MAX_SESSIONS=2, so total chrome
+    capacity is 1 node x 2 sessions = 2 concurrent sessions. Requesting a
+    3rd session from a 3rd TestNG thread on a resource-constrained CI runner
+    can starve the container (CPU/RAM) badly enough that an in-progress
+    Chrome session dies mid-test - that's what a NoSuchSessionException
+    actually means (the session is gone), as opposed to a
+    StaleElementReferenceException (session is fine, DOM just changed under
+    an old element reference). This is a real failure this project hit:
+    thread-count=3 against a 2-session-capacity node caused exactly this.
+
+    parallel="methods" is still correct and still requires DriverFactory's
+    ThreadLocal - that reasoning doesn't change. Only the thread COUNT
+    needed to change, to match infrastructure capacity rather than be
+    picked arbitrarily.
+
+    If you scale chrome-node/firefox-node up (more replicas or higher
+    SE_NODE_MAX_SESSIONS), thread-count can safely go up to match.
 -->
-<suite name="GridSuite" parallel="methods" thread-count="3">
+<suite name="GridSuite" parallel="methods" thread-count="2">
     <test name="RegressionTests">
         <classes>
             <class name="com.tests.LoginTest"/>
